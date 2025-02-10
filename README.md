@@ -24,8 +24,6 @@ git clone https://github.com/c-paas/cpaas-controller
 cd cpaas-controller
 ```
 
-Run `go mod vendor` to create and populate the `vendor` directory.
-
 ## Running
 
 ```sh
