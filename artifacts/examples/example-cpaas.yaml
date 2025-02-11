@@ -2,6 +2,7 @@ apiVersion: cpaascontroller.cpaas.io/v1alpha1
 kind: ControlPlane
 metadata:
   name: control-plane
+  namespace: default
 spec:
   deploymentName: control-plane
   replicas: 1

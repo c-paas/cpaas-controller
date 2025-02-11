@@ -18,6 +18,12 @@ all: help
 build: ## Build all the binaries and put the output
 	$(GOCMD) build -ldflags "-X main.version=$(BRANCH)-$(HASH)" -o $(PROJECT_NAME) .
 
+## Deploy:
+deploy: ## Deploy all CRD's and example CR to current cluster
+	kubectl apply -f artifacts/examples/crd-status-subresource.yaml
+	kubectl apply -f artifacts/examples/crd.yaml
+	kubectl apply -f artifacts/examples/example-cpaas.yaml
+
 ## Clean:
 clean: ## Remove build related file
 	@-rm -fr ./$(PROJECT_NAME)

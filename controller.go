@@ -290,9 +290,9 @@ func (c *Controller) syncHandler(ctx context.Context, objectRef cache.ObjectName
 		return err
 	}
 
-	// Finally, we update the status block of the Foo resource to reflect the
+	// Finally, we update the status block of the ControlPlane resource to reflect the
 	// current state of the world
-	err = c.updateFooStatus(ctx, cp, deployment)
+	err = c.updateControlPlaneStatus(ctx, cp, deployment)
 	if err != nil {
 		return err
 	}
@@ -301,7 +301,7 @@ func (c *Controller) syncHandler(ctx context.Context, objectRef cache.ObjectName
 	return nil
 }
 
-func (c *Controller) updateFooStatus(ctx context.Context, cp *cpaasv1alpha1.ControlPlane, deployment *appsv1.Deployment) error {
+func (c *Controller) updateControlPlaneStatus(ctx context.Context, cp *cpaasv1alpha1.ControlPlane, deployment *appsv1.Deployment) error {
 	// NEVER modify objects from the store. It's a read-only, local cache.
 	// You can use DeepCopy() to make a deep copy of original object and modify this copy
 	// Or create a copy manually for better performance
@@ -355,7 +355,7 @@ func (c *Controller) handleObject(obj interface{}) {
 	}
 	logger.V(4).Info("Processing object", "object", klog.KObj(object))
 	if ownerRef := metav1.GetControllerOf(object); ownerRef != nil {
-		// If this object is not owned by a Foo, we should not do anything more
+		// If this object is not owned by a ControlPlane, we should not do anything more
 		// with it.
 		if ownerRef.Kind != "ControlPlane" {
 			return
@@ -377,7 +377,7 @@ func (c *Controller) handleObject(obj interface{}) {
 // the ControlPlane resource that 'owns' it.
 func newDeployment(cp *cpaasv1alpha1.ControlPlane) *appsv1.Deployment {
 	labels := map[string]string{
-		"app":        "nginx",
+		"app":        "control-plane",
 		"controller": cp.Name,
 	}
 	return &appsv1.Deployment{
@@ -398,11 +398,82 @@ func newDeployment(cp *cpaasv1alpha1.ControlPlane) *appsv1.Deployment {
 					Labels: labels,
 				},
 				Spec: corev1.PodSpec{
+					Volumes: []corev1.Volume{
+						{
+							Name: "service-account",
+							VolumeSource: corev1.VolumeSource{
+								ConfigMap: &corev1.ConfigMapVolumeSource{
+									LocalObjectReference: corev1.LocalObjectReference{
+										Name: "service-account",
+									},
+								},
+							},
+						},
+						{
+							Name: "service-account-key",
+							VolumeSource: corev1.VolumeSource{
+								ConfigMap: &corev1.ConfigMapVolumeSource{
+									LocalObjectReference: corev1.LocalObjectReference{
+										Name: "service-account-key",
+									},
+								},
+							},
+						},
+					},
 					Containers: []corev1.Container{
 						{
-							Name:  "nginx",
-							Image: "nginx:latest",
+							Name:  "etcd",
+							Image: "registry.k8s.io/etcd:3.5.16-0",
+							Command: []string{
+								"etcd",
+								"--advertise-client-urls=https://127.0.0.1:2379",
+								"--initial-cluster=control-plane=https://127.0.0.1:2380",
+							},
 						},
+						{
+							Name:  "kube-apiserver",
+							Image: "rancher/hyperkube:v1.31.5-rancher1",
+							VolumeMounts: []corev1.VolumeMount{
+								{
+									Name:      "service-account",
+									ReadOnly:  true,
+									MountPath: "/var/lib/kubernetes/sa",
+								},
+								{
+									Name:      "service-account-key",
+									ReadOnly:  true,
+									MountPath: "/var/lib/kubernetes/sa-key",
+								},
+							},
+							Command: []string{
+								"/usr/local/bin/kube-apiserver",
+								"--service-account-key-file=/var/lib/kubernetes/sa/service-account.pem",
+								"--service-account-signing-key-file=/var/lib/kubernetes/sa-key/service-account-key.pem",
+								"--service-account-issuer=api",
+								"--bind-address=0.0.0.0",
+								"--etcd-servers=127.0.0.1:2379",
+								"--service-cluster-ip-range=10.0.0.0/16",
+							},
+						},
+						// {
+						// 	Name:  "kube-controller-manager",
+						// 	Image: "rancher/hyperkube:v1.31.5-rancher1",
+						// 	Command: []string{
+						// 		"/usr/local/bin/kube-controller-manager",
+						// 		"--cluster-cidr=10.10.0.0/16",
+						// 		"--master=http://127.0.0.1:8080",
+						// 		"--service-cluster-ip-range=10.0.0.0/16",
+						// 		"--leader-elect=false",
+						// 	},
+						// },
+						// {
+						// 	Name:  "kube-scheduler",
+						// 	Image: "rancher/hyperkube:v1.31.5-rancher1",
+						// 	Command: []string{
+						// 		"/usr/local/bin/kube-scheduler",
+						// 		"--master=http://127.0.0.1:8080",
+						// 	},
+						// },
 					},
 				},
 			},

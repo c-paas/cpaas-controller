@@ -28,6 +28,6 @@ spec:
                 availableReplicas:
                   type: integer
   names:
-    kind: Foo
-    plural: foos
+    kind: ControlPlane
+    plural: controlplanes
   scope: Namespaced

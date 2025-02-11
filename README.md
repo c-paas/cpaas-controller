@@ -30,16 +30,18 @@ cd cpaas-controller
 # to create and populate the `vendor` directory.
 go mod vendor
 # create working cluster (with kind for example)
-kind create --config=kind.yaml cluster
+kind create --config=./kind.yaml cluster
 # assumes you have a working kubeconfig, not required if operating in-cluster
 make run
-# create a CustomResourceDefinition
-kubectl create -f artifacts/examples/crd-status-subresource.yaml
-# create a custom resource of type ControlPlane
-kubectl create -f artifacts/examples/example-cpaas.yaml
+# deploy keys for kube-apiserver
+kubectl create configmap service-account --from-file=hack/service-account.pem
+kubectl create configmap service-account-key --from-file=hack/service-account-key.pem
+# deploy CRD and CR
+make deploy
 # check deployments created through the custom resource
 kubectl get deployments
 kubectl get controlplanes
+kubectl get pods
 ```
 
 ## Cleanup
