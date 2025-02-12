@@ -460,7 +460,7 @@ func newDeployment(cp *cpaasv1alpha1.ControlPlane) *appsv1.Deployment {
 								"--service-account-signing-key-file=/etc/kubernetes/pki/certs/kube-api-server.key",
 								"--service-account-issuer=api",
 								"--bind-address=0.0.0.0",
-								"--etcd-servers=localhost:2379",
+								"--etcd-servers=https://localhost:2379",
 								"--service-cluster-ip-range=10.0.0.0/16",
 							},
 						},
