@@ -1,2 +1,7 @@
 cpaas-controller
 vendor
+hack/certs/generated/*.crt
+hack/certs/generated/*.key
+hack/certs/generated/*.csr
+hack/certs/generated/*.srl
+*.DS_Store

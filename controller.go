@@ -400,21 +400,11 @@ func newDeployment(cp *cpaasv1alpha1.ControlPlane) *appsv1.Deployment {
 				Spec: corev1.PodSpec{
 					Volumes: []corev1.Volume{
 						{
-							Name: "service-account",
+							Name: "certs",
 							VolumeSource: corev1.VolumeSource{
 								ConfigMap: &corev1.ConfigMapVolumeSource{
 									LocalObjectReference: corev1.LocalObjectReference{
-										Name: "service-account",
-									},
-								},
-							},
-						},
-						{
-							Name: "service-account-key",
-							VolumeSource: corev1.VolumeSource{
-								ConfigMap: &corev1.ConfigMapVolumeSource{
-									LocalObjectReference: corev1.LocalObjectReference{
-										Name: "service-account-key",
+										Name: "certs",
 									},
 								},
 							},
@@ -424,34 +414,53 @@ func newDeployment(cp *cpaasv1alpha1.ControlPlane) *appsv1.Deployment {
 						{
 							Name:  "etcd",
 							Image: "registry.k8s.io/etcd:3.5.16-0",
+							VolumeMounts: []corev1.VolumeMount{
+								{
+									Name:      "certs",
+									ReadOnly:  true,
+									MountPath: "/etc/kubernetes/pki/certs",
+								},
+							},
 							Command: []string{
 								"etcd",
-								"--advertise-client-urls=https://127.0.0.1:2379",
-								"--initial-cluster=control-plane=https://127.0.0.1:2380",
+								"--advertise-client-urls=https://localhost:2379",
+								"--initial-advertise-peer-urls=https://localhost:2380",
+								"--initial-cluster=control-plane=https://localhost:2380",
+								"--cert-file=/etc/kubernetes/pki/certs/kube-api-server.crt",
+								"--data-dir=/var/lib/etcd",
+								"--experimental-initial-corrupt-check=true",
+								"--experimental-watch-progress-notify-interval=5s",
+								"--listen-client-urls=https://localhost:2379",
+								"--listen-metrics-urls=http://localhost:2381",
+								"--listen-peer-urls=https://localhost:2380",
+								"--name=control-plane",
+								"--client-cert-auth=true",
+								"--key-file=/etc/kubernetes/pki/certs/kube-api-server.key",
+								"--peer-cert-file=/etc/kubernetes/pki/certs/kube-api-server.crt",
+								"--peer-key-file=/etc/kubernetes/pki/certs/kube-api-server.key",
+								"--peer-client-cert-auth=true",
+								"--peer-trusted-ca-file=/etc/kubernetes/pki/certs/kube-api-server.crt",
+								"--trusted-ca-file=/etc/kubernetes/pki/certs/kube-api-server.crt",
+								"--snapshot-count=10000",
 							},
 						},
 						{
-							Name:  "kube-apiserver",
+							Name:  "kube-api-server",
 							Image: "rancher/hyperkube:v1.31.5-rancher1",
 							VolumeMounts: []corev1.VolumeMount{
 								{
-									Name:      "service-account",
+									Name:      "certs",
 									ReadOnly:  true,
-									MountPath: "/var/lib/kubernetes/sa",
-								},
-								{
-									Name:      "service-account-key",
-									ReadOnly:  true,
-									MountPath: "/var/lib/kubernetes/sa-key",
+									MountPath: "/etc/kubernetes/pki/certs",
 								},
 							},
 							Command: []string{
 								"/usr/local/bin/kube-apiserver",
-								"--service-account-key-file=/var/lib/kubernetes/sa/service-account.pem",
-								"--service-account-signing-key-file=/var/lib/kubernetes/sa-key/service-account-key.pem",
+								"--service-account-key-file=/etc/kubernetes/pki/certs/kube-api-server.crt",
+								"--service-account-signing-key-file=/etc/kubernetes/pki/certs/kube-api-server.key",
 								"--service-account-issuer=api",
 								"--bind-address=0.0.0.0",
-								"--etcd-servers=127.0.0.1:2379",
+								"--etcd-servers=localhost:2379",
 								"--service-cluster-ip-range=10.0.0.0/16",
 							},
 						},
