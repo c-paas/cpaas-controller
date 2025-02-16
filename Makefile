@@ -8,11 +8,15 @@ WHITE  := $(shell tput -Txterm setaf 7)
 CYAN   := $(shell tput -Txterm setaf 6)
 RESET  := $(shell tput -Txterm sgr0)
 
-.PHONY: all test build clean run
+.PHONY: all test build clean run generate-crd
 
 PROJECT_NAME := cpaas-controller
 
 all: help
+
+## Generate CRDs:
+generate-crd: ## Generate all CRDs for out custom resources
+	@controller-gen crd:maxDescLen=0 paths="./..." output:crd:dir=./artifacts/crd
 
 ## Build:
 build: ## Build all the binaries and put the output
