@@ -34,12 +34,10 @@ kind create --config=./kind.yaml cluster
 # assumes you have a working kubeconfig, not required if operating in-cluster
 make run
 # deploy keys for kube-apiserver
-kubectl create configmap service-account --from-file=hack/service-account.pem
-kubectl create configmap service-account-key --from-file=hack/service-account-key.pem
+./hack/certs-configmaps.sh
 # deploy CRD and CR
 make deploy
 # check deployments created through the custom resource
-kubectl get deployments
 kubectl get controlplanes
 kubectl get pods
 ```

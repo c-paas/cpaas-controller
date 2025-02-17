@@ -27,13 +27,15 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/selection"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/wait"
-	kubeinformers "k8s.io/client-go/informers"
+	coreinformer "k8s.io/client-go/informers/core/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/scheme"
 	typedcorev1 "k8s.io/client-go/kubernetes/typed/core/v1"
-	appslisters "k8s.io/client-go/listers/apps/v1"
+	corelisters "k8s.io/client-go/listers/core/v1"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/client-go/util/workqueue"
@@ -71,7 +73,7 @@ type Controller struct {
 	// clientset is a clientset for our own API group
 	clientset clientset.Interface
 
-	podsLister          appslisters.PodsLister
+	podsLister          corelisters.PodLister
 	podsSynced          cache.InformerSynced
 	controlPlanesLister listers.ControlPlaneLister
 	controlPlanesSynced cache.InformerSynced
@@ -85,7 +87,7 @@ func NewController(
 	ctx context.Context,
 	kubeclientset kubernetes.Interface,
 	clientset clientset.Interface,
-	podsInformer kubeinformers.PodInformer,
+	podsInformer coreinformer.PodInformer,
 	informer informers.ControlPlaneInformer,
 ) *Controller {
 	logger := klog.FromContext(ctx)
@@ -227,7 +229,7 @@ func (c *Controller) processNextWorkItem(ctx context.Context) bool {
 // converge the two. It then updates the Status block of the Foo resource
 // with the current status of the resource.
 func (c *Controller) syncHandler(ctx context.Context, objectRef cache.ObjectName) error {
-	// logger := klog.LoggerWithValues(klog.FromContext(ctx), "objectRef", objectRef)
+	logger := klog.LoggerWithValues(klog.FromContext(ctx), "objectRef", objectRef)
 
 	// Get the ControlPlane resource with this namespace/name
 	cp, err := c.controlPlanesLister.ControlPlanes(objectRef.Namespace).Get(objectRef.Name)
@@ -242,35 +244,47 @@ func (c *Controller) syncHandler(ctx context.Context, objectRef cache.ObjectName
 		return err
 	}
 
-	// deploymentName := cp.Spec.Name
-	// if deploymentName == "" {
-	// 	// We choose to absorb the error here as the worker would requeue the
-	// 	// resource otherwise. Instead, the next time the resource is updated
-	// 	// the resource will be queued again.
-	// 	utilruntime.HandleErrorWithContext(ctx, nil, "Deployment name missing from object reference", "objectReference", objectRef)
-	// 	return nil
-	// }
+	cpname := cp.Spec.Name
+	if cpname == "" {
+		// We choose to absorb the error here as the worker would requeue the
+		// resource otherwise. Instead, the next time the resource is updated
+		// the resource will be queued again.
+		utilruntime.HandleErrorWithContext(ctx, nil, "Deployment name missing from object reference", "objectReference", objectRef)
+		return nil
+	}
 
 	// Get the pods from control plane
-	deployment, err := c.podsLister.Pods(cp.Namespace).Get()
+	selector := labels.NewSelector()
+	// TODO log error
+	podReq, _ := labels.NewRequirement("controller", selection.Equals, []string{cp.Name})
+	selector = selector.Add(*podReq)
+	pods, err := c.podsLister.Pods(cp.Namespace).List(selector)
 	// If the resource doesn't exist, we'll create it
-	// if errors.IsNotFound(err) {
-	// 	deployment, err = c.kubeclientset.AppsV1().Deployments(cp.Namespace).Create(ctx, newDeployment(cp), metav1.CreateOptions{FieldManager: FieldManager})
-	// }
+	if len(pods) == 0 {
+		for _, p := range buildPods(cp) {
+			_, err := c.kubeclientset.CoreV1().Pods(cp.Namespace).Create(ctx, &p, metav1.CreateOptions{FieldManager: FieldManager})
+			if err != nil {
+				logger.V(4).Error(err, "cant create pod", "pod", p)
+				return err
+			}
+		}
+		// pods, err = c.kubeclientset.CoreV1().Pods(cp.Namespace).Create(ctx, newDeployment(cp), metav1.CreateOptions{FieldManager: FieldManager})
+	}
 	// If an error occurs during Get/Create, we'll requeue the item so we can
 	// attempt processing again later. This could have been caused by a
 	// temporary network failure, or any other transient reason.
 	if err != nil {
 		return err
 	}
+	logger.V(4).Info("Found pods", "pods", pods)
 
 	// If the Deployment is not controlled by this ControlPlane resource, we should log
 	// a warning to the event recorder and return error msg.
-	if !metav1.IsControlledBy(deployment, cp) {
-		msg := fmt.Sprintf(MessageResourceExists, deployment.Name)
-		c.recorder.Event(cp, corev1.EventTypeWarning, ErrResourceExists, msg)
-		return fmt.Errorf("%s", msg)
-	}
+	// if !metav1.IsControlledBy(deployment, cp) {
+	// 	msg := fmt.Sprintf(MessageResourceExists, deployment.Name)
+	// 	c.recorder.Event(cp, corev1.EventTypeWarning, ErrResourceExists, msg)
+	// 	return fmt.Errorf("%s", msg)
+	// }
 
 	// If this number of the replicas on the ControlPlane resource is specified, and the
 	// number does not equal the current desired replicas on the Deployment, we
@@ -283,16 +297,16 @@ func (c *Controller) syncHandler(ctx context.Context, objectRef cache.ObjectName
 	// If an error occurs during Update, we'll requeue the item so we can
 	// attempt processing again later. This could have been caused by a
 	// temporary network failure, or any other transient reason.
-	if err != nil {
-		return err
-	}
+	// if err != nil {
+	// 	return err
+	// }
 
 	// Finally, we update the status block of the ControlPlane resource to reflect the
 	// current state of the world
-	err = c.updateControlPlaneStatus(ctx, cp, deployment)
-	if err != nil {
-		return err
-	}
+	// err = c.updateControlPlaneStatus(ctx, cp, deployment)
+	// if err != nil {
+	// 	return err
+	// }
 
 	c.recorder.Event(cp, corev1.EventTypeNormal, SuccessSynced, MessageResourceSynced)
 	return nil

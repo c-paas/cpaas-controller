@@ -17,7 +17,6 @@ limitations under the License.
 package v1alpha1
 
 import (
-	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -25,23 +24,26 @@ import (
 // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
 
 // ControlPlane is a specification for a ControlPlane resource
+// +kubebuilder:subresource:status
 type ControlPlane struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
 
-	Spec   ControlPlaneSpec   `json:"spec"`
-	Status ControlPlaneStatus `json:"status"`
+	Spec ControlPlaneSpec `json:"spec,omitempty"`
+	// +optional
+	Status ControlPlaneStatus `json:"status,omitempty"`
 }
 
 // ControlPlaneSpec is the spec for a ControlPlane resource
 type ControlPlaneSpec struct {
-	Name     string   `json:"name"`
-	Pods     []v1.Pod `json:"pods"`
-	Replicas *int32   `json:"replicas"`
+	// +kubebuilder:validation:MaxLength=15
+	// +kubebuilder:validation:MinLength=1
+	Name string `json:"name"`
 }
 
 // ControlPlaneStatus is the status for a ControlPlane resource
 type ControlPlaneStatus struct {
+	// +optional
 	AvailableReplicas int32 `json:"availableReplicas"`
 }
 

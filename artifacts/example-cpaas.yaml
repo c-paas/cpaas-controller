@@ -4,5 +4,4 @@ metadata:
   name: control-plane
   namespace: default
 spec:
-  deploymentName: control-plane
-  replicas: 1
+  name: control-plane

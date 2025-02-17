@@ -25,9 +25,8 @@ build: ## Build all the binaries and put the output
 
 ## Deploy:
 deploy: ## Deploy all CRD's and example CR to current cluster
-	@kubectl apply -f artifacts/examples/crd-status-subresource.yaml
-	@kubectl apply -f artifacts/examples/crd.yaml
-	@kubectl apply -f artifacts/examples/example-cpaas.yaml
+	@kubectl apply -f artifacts/crd/
+	@kubectl apply -f artifacts/example-cpaas.yaml
 
 ## Clean:
 clean: ## Remove build related file
