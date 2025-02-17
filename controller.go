@@ -29,7 +29,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/wait"
-	appsinformers "k8s.io/client-go/informers/apps/v1"
+	kubeinformers "k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/scheme"
 	typedcorev1 "k8s.io/client-go/kubernetes/typed/core/v1"
@@ -71,8 +71,8 @@ type Controller struct {
 	// clientset is a clientset for our own API group
 	clientset clientset.Interface
 
-	deploymentsLister   appslisters.DeploymentLister
-	deploymentsSynced   cache.InformerSynced
+	podsLister          appslisters.PodsLister
+	podsSynced          cache.InformerSynced
 	controlPlanesLister listers.ControlPlaneLister
 	controlPlanesSynced cache.InformerSynced
 
@@ -85,7 +85,7 @@ func NewController(
 	ctx context.Context,
 	kubeclientset kubernetes.Interface,
 	clientset clientset.Interface,
-	deploymentInformer appsinformers.DeploymentInformer,
+	podsInformer kubeinformers.PodInformer,
 	informer informers.ControlPlaneInformer,
 ) *Controller {
 	logger := klog.FromContext(ctx)
@@ -105,8 +105,8 @@ func NewController(
 	controller := &Controller{
 		kubeclientset:       kubeclientset,
 		clientset:           clientset,
-		deploymentsLister:   deploymentInformer.Lister(),
-		deploymentsSynced:   deploymentInformer.Informer().HasSynced,
+		podsLister:          podsInformer.Lister(),
+		podsSynced:          podsInformer.Informer().HasSynced,
 		controlPlanesLister: informer.Lister(),
 		controlPlanesSynced: informer.Informer().HasSynced,
 		workqueue:           workqueue.NewTypedRateLimitingQueue(ratelimiter),
@@ -127,14 +127,12 @@ func NewController(
 	// processing. This way, we don't need to implement custom logic for
 	// handling Deployment resources. More info on this pattern:
 	// https://github.com/kubernetes/community/blob/8cafef897a22026d42f5e5bb3f104febe7e29830/contributors/devel/controllers.md
-	deploymentInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
+	podsInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc: controller.handleObject,
 		UpdateFunc: func(old, new interface{}) {
-			newDepl := new.(*appsv1.Deployment)
-			oldDepl := old.(*appsv1.Deployment)
-			if newDepl.ResourceVersion == oldDepl.ResourceVersion {
-				// Periodic resync will send update events for all known Deployments.
-				// Two different versions of the same Deployment will always have different RVs.
+			newPod := new.(*corev1.Pod)
+			oldPod := old.(*corev1.Pod)
+			if newPod.ResourceVersion == oldPod.ResourceVersion {
 				return
 			}
 			controller.handleObject(new)
@@ -160,7 +158,7 @@ func (c *Controller) Run(ctx context.Context, workers int) error {
 	// Wait for the caches to be synced before starting workers
 	logger.Info("Waiting for informer caches to sync")
 
-	if ok := cache.WaitForCacheSync(ctx.Done(), c.deploymentsSynced, c.controlPlanesSynced); !ok {
+	if ok := cache.WaitForCacheSync(ctx.Done(), c.podsSynced, c.controlPlanesSynced); !ok {
 		return fmt.Errorf("failed to wait for caches to sync")
 	}
 
@@ -229,7 +227,7 @@ func (c *Controller) processNextWorkItem(ctx context.Context) bool {
 // converge the two. It then updates the Status block of the Foo resource
 // with the current status of the resource.
 func (c *Controller) syncHandler(ctx context.Context, objectRef cache.ObjectName) error {
-	logger := klog.LoggerWithValues(klog.FromContext(ctx), "objectRef", objectRef)
+	// logger := klog.LoggerWithValues(klog.FromContext(ctx), "objectRef", objectRef)
 
 	// Get the ControlPlane resource with this namespace/name
 	cp, err := c.controlPlanesLister.ControlPlanes(objectRef.Namespace).Get(objectRef.Name)
@@ -244,22 +242,21 @@ func (c *Controller) syncHandler(ctx context.Context, objectRef cache.ObjectName
 		return err
 	}
 
-	deploymentName := cp.Spec.DeploymentName
-	if deploymentName == "" {
-		// We choose to absorb the error here as the worker would requeue the
-		// resource otherwise. Instead, the next time the resource is updated
-		// the resource will be queued again.
-		utilruntime.HandleErrorWithContext(ctx, nil, "Deployment name missing from object reference", "objectReference", objectRef)
-		return nil
-	}
+	// deploymentName := cp.Spec.Name
+	// if deploymentName == "" {
+	// 	// We choose to absorb the error here as the worker would requeue the
+	// 	// resource otherwise. Instead, the next time the resource is updated
+	// 	// the resource will be queued again.
+	// 	utilruntime.HandleErrorWithContext(ctx, nil, "Deployment name missing from object reference", "objectReference", objectRef)
+	// 	return nil
+	// }
 
-	// Get the deployment with the name specified in ControlPlane.spec
-	deployment, err := c.deploymentsLister.Deployments(cp.Namespace).Get(deploymentName)
+	// Get the pods from control plane
+	deployment, err := c.podsLister.Pods(cp.Namespace).Get()
 	// If the resource doesn't exist, we'll create it
-	if errors.IsNotFound(err) {
-		deployment, err = c.kubeclientset.AppsV1().Deployments(cp.Namespace).Create(ctx, newDeployment(cp), metav1.CreateOptions{FieldManager: FieldManager})
-	}
-
+	// if errors.IsNotFound(err) {
+	// 	deployment, err = c.kubeclientset.AppsV1().Deployments(cp.Namespace).Create(ctx, newDeployment(cp), metav1.CreateOptions{FieldManager: FieldManager})
+	// }
 	// If an error occurs during Get/Create, we'll requeue the item so we can
 	// attempt processing again later. This could have been caused by a
 	// temporary network failure, or any other transient reason.
@@ -278,10 +275,10 @@ func (c *Controller) syncHandler(ctx context.Context, objectRef cache.ObjectName
 	// If this number of the replicas on the ControlPlane resource is specified, and the
 	// number does not equal the current desired replicas on the Deployment, we
 	// should update the Deployment resource.
-	if cp.Spec.Replicas != nil && *cp.Spec.Replicas != *deployment.Spec.Replicas {
-		logger.V(4).Info("Update deployment resource", "currentReplicas", *deployment.Spec.Replicas, "desiredReplicas", *cp.Spec.Replicas)
-		deployment, err = c.kubeclientset.AppsV1().Deployments(cp.Namespace).Update(ctx, newDeployment(cp), metav1.UpdateOptions{FieldManager: FieldManager})
-	}
+	// if cp.Spec.Replicas != nil && *cp.Spec.Replicas != *deployment.Spec.Replicas {
+	// 	logger.V(4).Info("Update deployment resource", "currentReplicas", *deployment.Spec.Replicas, "desiredReplicas", *cp.Spec.Replicas)
+	// 	deployment, err = c.kubeclientset.AppsV1().Deployments(cp.Namespace).Update(ctx, newDeployment(cp), metav1.UpdateOptions{FieldManager: FieldManager})
+	// }
 
 	// If an error occurs during Update, we'll requeue the item so we can
 	// attempt processing again later. This could have been caused by a
@@ -372,123 +369,186 @@ func (c *Controller) handleObject(obj interface{}) {
 	}
 }
 
-// newDeployment creates a new Deployment for a ControlPlane resource. It also sets
+// buildPods creates a bunch of pods for a ControlPlane resource. It also sets
 // the appropriate OwnerReferences on the resource so handleObject can discover
 // the ControlPlane resource that 'owns' it.
-func newDeployment(cp *cpaasv1alpha1.ControlPlane) *appsv1.Deployment {
+func buildPods(cp *cpaasv1alpha1.ControlPlane) []corev1.Pod {
 	labels := map[string]string{
 		"app":        "control-plane",
 		"controller": cp.Name,
 	}
-	return &appsv1.Deployment{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      cp.Spec.DeploymentName,
-			Namespace: cp.Namespace,
-			OwnerReferences: []metav1.OwnerReference{
-				*metav1.NewControllerRef(cp, cpaasv1alpha1.SchemeGroupVersion.WithKind("ControlPlane")),
-			},
-		},
-		Spec: appsv1.DeploymentSpec{
-			Replicas: cp.Spec.Replicas,
-			Selector: &metav1.LabelSelector{
-				MatchLabels: labels,
-			},
-			Template: corev1.PodTemplateSpec{
-				ObjectMeta: metav1.ObjectMeta{
-					Labels: labels,
+	return []corev1.Pod{
+		{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      cp.Spec.Name,
+				Namespace: cp.Namespace,
+				OwnerReferences: []metav1.OwnerReference{
+					*metav1.NewControllerRef(cp, cpaasv1alpha1.SchemeGroupVersion.WithKind("ControlPlane")),
 				},
-				Spec: corev1.PodSpec{
-					Volumes: []corev1.Volume{
-						{
-							Name: "certs",
-							VolumeSource: corev1.VolumeSource{
-								ConfigMap: &corev1.ConfigMapVolumeSource{
-									LocalObjectReference: corev1.LocalObjectReference{
-										Name: "certs",
-									},
+				Labels: labels,
+			},
+			Spec: corev1.PodSpec{
+				Volumes: []corev1.Volume{
+					{
+						Name: "certs",
+						VolumeSource: corev1.VolumeSource{
+							ConfigMap: &corev1.ConfigMapVolumeSource{
+								LocalObjectReference: corev1.LocalObjectReference{
+									Name: "certs",
 								},
 							},
 						},
 					},
-					Containers: []corev1.Container{
-						{
-							Name:  "etcd",
-							Image: "registry.k8s.io/etcd:3.5.16-0",
-							VolumeMounts: []corev1.VolumeMount{
-								{
-									Name:      "certs",
-									ReadOnly:  true,
-									MountPath: "/etc/kubernetes/pki/certs",
-								},
-							},
-							Command: []string{
-								"etcd",
-								"--advertise-client-urls=https://localhost:2379",
-								"--initial-advertise-peer-urls=https://localhost:2380",
-								"--initial-cluster=control-plane=https://localhost:2380",
-								"--cert-file=/etc/kubernetes/pki/certs/kube-api-server.crt",
-								"--data-dir=/var/lib/etcd",
-								"--experimental-initial-corrupt-check=true",
-								"--experimental-watch-progress-notify-interval=5s",
-								"--listen-client-urls=https://localhost:2379",
-								"--listen-metrics-urls=http://localhost:2381",
-								"--listen-peer-urls=https://localhost:2380",
-								"--name=control-plane",
-								"--client-cert-auth=true",
-								"--key-file=/etc/kubernetes/pki/certs/kube-api-server.key",
-								"--peer-cert-file=/etc/kubernetes/pki/certs/kube-api-server.crt",
-								"--peer-key-file=/etc/kubernetes/pki/certs/kube-api-server.key",
-								"--peer-client-cert-auth=true",
-								"--peer-trusted-ca-file=/etc/kubernetes/pki/certs/ca.crt",
-								"--trusted-ca-file=/etc/kubernetes/pki/certs/ca.crt",
-								"--snapshot-count=10000",
+				},
+				Containers: []corev1.Container{
+					{
+						Name:  "etcd",
+						Image: "registry.k8s.io/etcd:3.5.16-0",
+						VolumeMounts: []corev1.VolumeMount{
+							{
+								Name:      "certs",
+								ReadOnly:  true,
+								MountPath: "/etc/kubernetes/pki/certs",
 							},
 						},
-						{
-							Name:  "kube-api-server",
-							Image: "rancher/hyperkube:v1.31.5-rancher1",
-							VolumeMounts: []corev1.VolumeMount{
-								{
-									Name:      "certs",
-									ReadOnly:  true,
-									MountPath: "/etc/kubernetes/pki/certs",
-								},
-							},
-							Command: []string{
-								"/usr/local/bin/kube-apiserver",
-								"--service-account-key-file=/etc/kubernetes/pki/certs/kube-api-server.crt",
-								"--service-account-signing-key-file=/etc/kubernetes/pki/certs/kube-api-server.key",
-								"--service-account-issuer=api",
-								"--bind-address=0.0.0.0",
-								"--etcd-servers=https://localhost:2379",
-								"--etcd-cafile=/etc/kubernetes/pki/certs/ca.crt",
-								"--etcd-certfile=/etc/kubernetes/pki/certs/kube-api-server.crt",
-								"--etcd-keyfile=/etc/kubernetes/pki/certs/kube-api-server.key",
-								"--service-cluster-ip-range=10.0.0.0/16",
-							},
+						Command: []string{
+							"etcd",
+							"--advertise-client-urls=https://localhost:2379",
+							"--initial-advertise-peer-urls=https://localhost:2380",
+							"--initial-cluster=control-plane=https://localhost:2380",
+							"--cert-file=/etc/kubernetes/pki/certs/kube-api-server.crt",
+							"--data-dir=/var/lib/etcd",
+							"--experimental-initial-corrupt-check=true",
+							"--experimental-watch-progress-notify-interval=5s",
+							"--listen-client-urls=https://localhost:2379",
+							"--listen-metrics-urls=http://localhost:2381",
+							"--listen-peer-urls=https://localhost:2380",
+							"--name=control-plane",
+							"--client-cert-auth=true",
+							"--key-file=/etc/kubernetes/pki/certs/kube-api-server.key",
+							"--peer-cert-file=/etc/kubernetes/pki/certs/kube-api-server.crt",
+							"--peer-key-file=/etc/kubernetes/pki/certs/kube-api-server.key",
+							"--peer-client-cert-auth=true",
+							"--peer-trusted-ca-file=/etc/kubernetes/pki/certs/ca.crt",
+							"--trusted-ca-file=/etc/kubernetes/pki/certs/ca.crt",
+							"--snapshot-count=10000",
 						},
-						// {
-						// 	Name:  "kube-controller-manager",
-						// 	Image: "rancher/hyperkube:v1.31.5-rancher1",
-						// 	Command: []string{
-						// 		"/usr/local/bin/kube-controller-manager",
-						// 		"--cluster-cidr=10.10.0.0/16",
-						// 		"--master=http://127.0.0.1:8080",
-						// 		"--service-cluster-ip-range=10.0.0.0/16",
-						// 		"--leader-elect=false",
-						// 	},
-						// },
-						// {
-						// 	Name:  "kube-scheduler",
-						// 	Image: "rancher/hyperkube:v1.31.5-rancher1",
-						// 	Command: []string{
-						// 		"/usr/local/bin/kube-scheduler",
-						// 		"--master=http://127.0.0.1:8080",
-						// 	},
-						// },
 					},
 				},
 			},
 		},
 	}
 }
+
+// return &appsv1.Deployment{
+// 	ObjectMeta: metav1.ObjectMeta{
+// 		Name:      cp.Spec.DeploymentName,
+// 		Namespace: cp.Namespace,
+// 		OwnerReferences: []metav1.OwnerReference{
+// 			*metav1.NewControllerRef(cp, cpaasv1alpha1.SchemeGroupVersion.WithKind("ControlPlane")),
+// 		},
+// 	},
+// 	Spec: appsv1.DeploymentSpec{
+// 		Replicas: cp.Spec.Replicas,
+// 		Selector: &metav1.LabelSelector{
+// 			MatchLabels: labels,
+// 		},
+// 		Template: corev1.PodTemplateSpec{
+// 			ObjectMeta: metav1.ObjectMeta{
+// 				Labels: labels,
+// 			},
+// 			Spec: corev1.PodSpec{
+// 				Volumes: []corev1.Volume{
+// 					{
+// 						Name: "certs",
+// 						VolumeSource: corev1.VolumeSource{
+// 							ConfigMap: &corev1.ConfigMapVolumeSource{
+// 								LocalObjectReference: corev1.LocalObjectReference{
+// 									Name: "certs",
+// 								},
+// 							},
+// 						},
+// 					},
+// 				},
+// 				Containers: []corev1.Container{
+// 					{
+// 						Name:  "etcd",
+// 						Image: "registry.k8s.io/etcd:3.5.16-0",
+// 						VolumeMounts: []corev1.VolumeMount{
+// 							{
+// 								Name:      "certs",
+// 								ReadOnly:  true,
+// 								MountPath: "/etc/kubernetes/pki/certs",
+// 							},
+// 						},
+// 						Command: []string{
+// 							"etcd",
+// 							"--advertise-client-urls=https://localhost:2379",
+// 							"--initial-advertise-peer-urls=https://localhost:2380",
+// 							"--initial-cluster=control-plane=https://localhost:2380",
+// 							"--cert-file=/etc/kubernetes/pki/certs/kube-api-server.crt",
+// 							"--data-dir=/var/lib/etcd",
+// 							"--experimental-initial-corrupt-check=true",
+// 							"--experimental-watch-progress-notify-interval=5s",
+// 							"--listen-client-urls=https://localhost:2379",
+// 							"--listen-metrics-urls=http://localhost:2381",
+// 							"--listen-peer-urls=https://localhost:2380",
+// 							"--name=control-plane",
+// 							"--client-cert-auth=true",
+// 							"--key-file=/etc/kubernetes/pki/certs/kube-api-server.key",
+// 							"--peer-cert-file=/etc/kubernetes/pki/certs/kube-api-server.crt",
+// 							"--peer-key-file=/etc/kubernetes/pki/certs/kube-api-server.key",
+// 							"--peer-client-cert-auth=true",
+// 							"--peer-trusted-ca-file=/etc/kubernetes/pki/certs/ca.crt",
+// 							"--trusted-ca-file=/etc/kubernetes/pki/certs/ca.crt",
+// 							"--snapshot-count=10000",
+// 						},
+// 					},
+// 					{
+// 						Name:  "kube-api-server",
+// 						Image: "rancher/hyperkube:v1.31.5-rancher1",
+// 						VolumeMounts: []corev1.VolumeMount{
+// 							{
+// 								Name:      "certs",
+// 								ReadOnly:  true,
+// 								MountPath: "/etc/kubernetes/pki/certs",
+// 							},
+// 						},
+// 						Command: []string{
+// 							"/usr/local/bin/kube-apiserver",
+// 							"--service-account-key-file=/etc/kubernetes/pki/certs/kube-api-server.crt",
+// 							"--service-account-signing-key-file=/etc/kubernetes/pki/certs/kube-api-server.key",
+// 							"--service-account-issuer=api",
+// 							"--bind-address=0.0.0.0",
+// 							"--etcd-servers=https://localhost:2379",
+// 							"--etcd-cafile=/etc/kubernetes/pki/certs/ca.crt",
+// 							"--etcd-certfile=/etc/kubernetes/pki/certs/kube-api-server.crt",
+// 							"--etcd-keyfile=/etc/kubernetes/pki/certs/kube-api-server.key",
+// 							"--service-cluster-ip-range=10.0.0.0/16",
+// 						},
+// 					},
+// 					// {
+// 					// 	Name:  "kube-controller-manager",
+// 					// 	Image: "rancher/hyperkube:v1.31.5-rancher1",
+// 					// 	Command: []string{
+// 					// 		"/usr/local/bin/kube-controller-manager",
+// 					// 		"--cluster-cidr=10.10.0.0/16",
+// 					// 		"--master=http://127.0.0.1:8080",
+// 					// 		"--service-cluster-ip-range=10.0.0.0/16",
+// 					// 		"--leader-elect=false",
+// 					// 	},
+// 					// },
+// 					// {
+// 					// 	Name:  "kube-scheduler",
+// 					// 	Image: "rancher/hyperkube:v1.31.5-rancher1",
+// 					// 	Command: []string{
+// 					// 		"/usr/local/bin/kube-scheduler",
+// 					// 		"--master=http://127.0.0.1:8080",
+// 					// 	},
+// 					// },
+// 				},
+// 			},
+// 		},
+// 	},
+// }
+// }

@@ -5,3 +5,4 @@ hack/certs/generated/*.key
 hack/certs/generated/*.csr
 hack/certs/generated/*.srl
 *.DS_Store
+bin/*

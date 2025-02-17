@@ -17,6 +17,7 @@ limitations under the License.
 package v1alpha1
 
 import (
+	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -34,8 +35,9 @@ type ControlPlane struct {
 
 // ControlPlaneSpec is the spec for a ControlPlane resource
 type ControlPlaneSpec struct {
-	DeploymentName string `json:"deploymentName"`
-	Replicas       *int32 `json:"replicas"`
+	Name     string   `json:"name"`
+	Pods     []v1.Pod `json:"pods"`
+	Replicas *int32   `json:"replicas"`
 }
 
 // ControlPlaneStatus is the status for a ControlPlane resource

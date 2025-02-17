@@ -11,12 +11,13 @@ RESET  := $(shell tput -Txterm sgr0)
 .PHONY: all test build clean run generate-crd
 
 PROJECT_NAME := cpaas-controller
+CONTROLLER_GEN_VERSION := v0.17.2
 
 all: help
 
 ## Generate CRDs:
 generate-crd: ## Generate all CRDs for out custom resources
-	@controller-gen crd:maxDescLen=0 paths="./..." output:crd:dir=./artifacts/crd
+	@./bin/controller-gen crd:maxDescLen=0 paths="./..." output:crd:dir=./artifacts/crd
 
 ## Build:
 build: ## Build all the binaries and put the output
@@ -39,6 +40,11 @@ run: clean build ## Run `make run`
 ## Test:
 test: ## Run the tests
 	$(GOTEST) -v -race ./...
+
+## Deps:
+deps: ## Install deps
+	@go mod vendor
+	@go build -mod vendor -o bin/controller-gen sigs.k8s.io/controller-tools/cmd/controller-gen
 
 ## Help:
 help: ## Show this help.
