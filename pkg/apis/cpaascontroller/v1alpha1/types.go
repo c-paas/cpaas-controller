@@ -44,7 +44,7 @@ type ControlPlaneSpec struct {
 // ControlPlaneStatus is the status for a ControlPlane resource
 type ControlPlaneStatus struct {
 	// +optional
-	AvailableReplicas int32 `json:"availableReplicas"`
+	AllPodsRunning bool `json:"allPodsRunning"`
 }
 
 // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object

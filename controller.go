@@ -23,7 +23,6 @@ import (
 
 	"golang.org/x/time/rate"
 
-	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -278,17 +277,20 @@ func (c *Controller) syncHandler(ctx context.Context, objectRef cache.ObjectName
 	}
 	logger.V(4).Info("Found pods", "pods", pods)
 
-	// If the Deployment is not controlled by this ControlPlane resource, we should log
+	// If the Pods are not controlled by this ControlPlane resource, we should log
 	// a warning to the event recorder and return error msg.
-	// if !metav1.IsControlledBy(deployment, cp) {
-	// 	msg := fmt.Sprintf(MessageResourceExists, deployment.Name)
-	// 	c.recorder.Event(cp, corev1.EventTypeWarning, ErrResourceExists, msg)
-	// 	return fmt.Errorf("%s", msg)
-	// }
+	for _, p := range pods {
+		if !metav1.IsControlledBy(p, cp) {
+			msg := fmt.Sprintf(MessageResourceExists, cp.Name)
+			c.recorder.Event(cp, corev1.EventTypeWarning, ErrResourceExists, msg)
+			return fmt.Errorf("%s", msg)
+		}
+	}
 
 	// If this number of the replicas on the ControlPlane resource is specified, and the
 	// number does not equal the current desired replicas on the Deployment, we
 	// should update the Deployment resource.
+	// TODO check if all pods are healthy and running
 	// if cp.Spec.Replicas != nil && *cp.Spec.Replicas != *deployment.Spec.Replicas {
 	// 	logger.V(4).Info("Update deployment resource", "currentReplicas", *deployment.Spec.Replicas, "desiredReplicas", *cp.Spec.Replicas)
 	// 	deployment, err = c.kubeclientset.AppsV1().Deployments(cp.Namespace).Update(ctx, newDeployment(cp), metav1.UpdateOptions{FieldManager: FieldManager})
@@ -303,21 +305,24 @@ func (c *Controller) syncHandler(ctx context.Context, objectRef cache.ObjectName
 
 	// Finally, we update the status block of the ControlPlane resource to reflect the
 	// current state of the world
-	// err = c.updateControlPlaneStatus(ctx, cp, deployment)
-	// if err != nil {
-	// 	return err
-	// }
+	for _, p := range pods {
+		err = c.updateControlPlaneStatus(ctx, cp, p)
+		if err != nil {
+			return err
+		}
+	}
 
 	c.recorder.Event(cp, corev1.EventTypeNormal, SuccessSynced, MessageResourceSynced)
 	return nil
 }
 
-func (c *Controller) updateControlPlaneStatus(ctx context.Context, cp *cpaasv1alpha1.ControlPlane, deployment *appsv1.Deployment) error {
+// TODO mock pods status for a while
+func (c *Controller) updateControlPlaneStatus(ctx context.Context, cp *cpaasv1alpha1.ControlPlane, _ *corev1.Pod) error {
 	// NEVER modify objects from the store. It's a read-only, local cache.
 	// You can use DeepCopy() to make a deep copy of original object and modify this copy
 	// Or create a copy manually for better performance
 	cpCopy := cp.DeepCopy()
-	cpCopy.Status.AvailableReplicas = deployment.Status.AvailableReplicas
+	cpCopy.Status.AllPodsRunning = true
 	// If the CustomResourceSubresources feature gate is not enabled,
 	// we must use Update instead of UpdateStatus to update the Status block of the ControlPlane resource.
 	// UpdateStatus will not allow changes to the Spec of the resource,
@@ -394,7 +399,7 @@ func buildPods(cp *cpaasv1alpha1.ControlPlane) []corev1.Pod {
 	return []corev1.Pod{
 		{
 			ObjectMeta: metav1.ObjectMeta{
-				Name:      cp.Spec.Name,
+				Name:      "etcd",
 				Namespace: cp.Namespace,
 				OwnerReferences: []metav1.OwnerReference{
 					*metav1.NewControllerRef(cp, cpaasv1alpha1.SchemeGroupVersion.WithKind("ControlPlane")),
@@ -451,118 +456,125 @@ func buildPods(cp *cpaasv1alpha1.ControlPlane) []corev1.Pod {
 				},
 			},
 		},
+		{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "kube-api-server",
+				Namespace: cp.Namespace,
+				OwnerReferences: []metav1.OwnerReference{
+					*metav1.NewControllerRef(cp, cpaasv1alpha1.SchemeGroupVersion.WithKind("ControlPlane")),
+				},
+				Labels: labels,
+			},
+			Spec: corev1.PodSpec{
+				Volumes: []corev1.Volume{
+					{
+						Name: "certs",
+						VolumeSource: corev1.VolumeSource{
+							ConfigMap: &corev1.ConfigMapVolumeSource{
+								LocalObjectReference: corev1.LocalObjectReference{
+									Name: "certs",
+								},
+							},
+						},
+					},
+				},
+				Containers: []corev1.Container{
+					{
+						Name:  "kube-api-server",
+						Image: "rancher/hyperkube:v1.31.5-rancher1",
+						VolumeMounts: []corev1.VolumeMount{
+							{
+								Name:      "certs",
+								ReadOnly:  true,
+								MountPath: "/etc/kubernetes/pki/certs",
+							},
+						},
+						Command: []string{
+							"/usr/local/bin/kube-apiserver",
+							"--service-account-key-file=/etc/kubernetes/pki/certs/kube-api-server.crt",
+							"--service-account-signing-key-file=/etc/kubernetes/pki/certs/kube-api-server.key",
+							"--service-account-issuer=api",
+							"--bind-address=0.0.0.0",
+							"--etcd-servers=https://localhost:2379",
+							"--etcd-cafile=/etc/kubernetes/pki/certs/ca.crt",
+							"--etcd-certfile=/etc/kubernetes/pki/certs/kube-api-server.crt",
+							"--etcd-keyfile=/etc/kubernetes/pki/certs/kube-api-server.key",
+							"--service-cluster-ip-range=10.0.0.0/16",
+						},
+					},
+				},
+			},
+		},
+		{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "kube-controller-manager",
+				Namespace: cp.Namespace,
+				OwnerReferences: []metav1.OwnerReference{
+					*metav1.NewControllerRef(cp, cpaasv1alpha1.SchemeGroupVersion.WithKind("ControlPlane")),
+				},
+				Labels: labels,
+			},
+			Spec: corev1.PodSpec{
+				Volumes: []corev1.Volume{
+					{
+						Name: "certs",
+						VolumeSource: corev1.VolumeSource{
+							ConfigMap: &corev1.ConfigMapVolumeSource{
+								LocalObjectReference: corev1.LocalObjectReference{
+									Name: "certs",
+								},
+							},
+						},
+					},
+				},
+				Containers: []corev1.Container{
+					{
+						Name:  "kube-controller-manager",
+						Image: "rancher/hyperkube:v1.31.5-rancher1",
+						Command: []string{
+							"/usr/local/bin/kube-controller-manager",
+							"--cluster-cidr=10.10.0.0/16",
+							"--master=http://127.0.0.1:8080",
+							"--service-cluster-ip-range=10.0.0.0/16",
+							"--leader-elect=false",
+						},
+					},
+				},
+			},
+		},
+		{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "kube-scheduler",
+				Namespace: cp.Namespace,
+				OwnerReferences: []metav1.OwnerReference{
+					*metav1.NewControllerRef(cp, cpaasv1alpha1.SchemeGroupVersion.WithKind("ControlPlane")),
+				},
+				Labels: labels,
+			},
+			Spec: corev1.PodSpec{
+				Volumes: []corev1.Volume{
+					{
+						Name: "certs",
+						VolumeSource: corev1.VolumeSource{
+							ConfigMap: &corev1.ConfigMapVolumeSource{
+								LocalObjectReference: corev1.LocalObjectReference{
+									Name: "certs",
+								},
+							},
+						},
+					},
+				},
+				Containers: []corev1.Container{
+					{
+						Name:  "kube-scheduler",
+						Image: "rancher/hyperkube:v1.31.5-rancher1",
+						Command: []string{
+							"/usr/local/bin/kube-scheduler",
+							"--master=http://127.0.0.1:8080",
+						},
+					},
+				},
+			},
+		},
 	}
 }
-
-// return &appsv1.Deployment{
-// 	ObjectMeta: metav1.ObjectMeta{
-// 		Name:      cp.Spec.DeploymentName,
-// 		Namespace: cp.Namespace,
-// 		OwnerReferences: []metav1.OwnerReference{
-// 			*metav1.NewControllerRef(cp, cpaasv1alpha1.SchemeGroupVersion.WithKind("ControlPlane")),
-// 		},
-// 	},
-// 	Spec: appsv1.DeploymentSpec{
-// 		Replicas: cp.Spec.Replicas,
-// 		Selector: &metav1.LabelSelector{
-// 			MatchLabels: labels,
-// 		},
-// 		Template: corev1.PodTemplateSpec{
-// 			ObjectMeta: metav1.ObjectMeta{
-// 				Labels: labels,
-// 			},
-// 			Spec: corev1.PodSpec{
-// 				Volumes: []corev1.Volume{
-// 					{
-// 						Name: "certs",
-// 						VolumeSource: corev1.VolumeSource{
-// 							ConfigMap: &corev1.ConfigMapVolumeSource{
-// 								LocalObjectReference: corev1.LocalObjectReference{
-// 									Name: "certs",
-// 								},
-// 							},
-// 						},
-// 					},
-// 				},
-// 				Containers: []corev1.Container{
-// 					{
-// 						Name:  "etcd",
-// 						Image: "registry.k8s.io/etcd:3.5.16-0",
-// 						VolumeMounts: []corev1.VolumeMount{
-// 							{
-// 								Name:      "certs",
-// 								ReadOnly:  true,
-// 								MountPath: "/etc/kubernetes/pki/certs",
-// 							},
-// 						},
-// 						Command: []string{
-// 							"etcd",
-// 							"--advertise-client-urls=https://localhost:2379",
-// 							"--initial-advertise-peer-urls=https://localhost:2380",
-// 							"--initial-cluster=control-plane=https://localhost:2380",
-// 							"--cert-file=/etc/kubernetes/pki/certs/kube-api-server.crt",
-// 							"--data-dir=/var/lib/etcd",
-// 							"--experimental-initial-corrupt-check=true",
-// 							"--experimental-watch-progress-notify-interval=5s",
-// 							"--listen-client-urls=https://localhost:2379",
-// 							"--listen-metrics-urls=http://localhost:2381",
-// 							"--listen-peer-urls=https://localhost:2380",
-// 							"--name=control-plane",
-// 							"--client-cert-auth=true",
-// 							"--key-file=/etc/kubernetes/pki/certs/kube-api-server.key",
-// 							"--peer-cert-file=/etc/kubernetes/pki/certs/kube-api-server.crt",
-// 							"--peer-key-file=/etc/kubernetes/pki/certs/kube-api-server.key",
-// 							"--peer-client-cert-auth=true",
-// 							"--peer-trusted-ca-file=/etc/kubernetes/pki/certs/ca.crt",
-// 							"--trusted-ca-file=/etc/kubernetes/pki/certs/ca.crt",
-// 							"--snapshot-count=10000",
-// 						},
-// 					},
-// 					{
-// 						Name:  "kube-api-server",
-// 						Image: "rancher/hyperkube:v1.31.5-rancher1",
-// 						VolumeMounts: []corev1.VolumeMount{
-// 							{
-// 								Name:      "certs",
-// 								ReadOnly:  true,
-// 								MountPath: "/etc/kubernetes/pki/certs",
-// 							},
-// 						},
-// 						Command: []string{
-// 							"/usr/local/bin/kube-apiserver",
-// 							"--service-account-key-file=/etc/kubernetes/pki/certs/kube-api-server.crt",
-// 							"--service-account-signing-key-file=/etc/kubernetes/pki/certs/kube-api-server.key",
-// 							"--service-account-issuer=api",
-// 							"--bind-address=0.0.0.0",
-// 							"--etcd-servers=https://localhost:2379",
-// 							"--etcd-cafile=/etc/kubernetes/pki/certs/ca.crt",
-// 							"--etcd-certfile=/etc/kubernetes/pki/certs/kube-api-server.crt",
-// 							"--etcd-keyfile=/etc/kubernetes/pki/certs/kube-api-server.key",
-// 							"--service-cluster-ip-range=10.0.0.0/16",
-// 						},
-// 					},
-// 					// {
-// 					// 	Name:  "kube-controller-manager",
-// 					// 	Image: "rancher/hyperkube:v1.31.5-rancher1",
-// 					// 	Command: []string{
-// 					// 		"/usr/local/bin/kube-controller-manager",
-// 					// 		"--cluster-cidr=10.10.0.0/16",
-// 					// 		"--master=http://127.0.0.1:8080",
-// 					// 		"--service-cluster-ip-range=10.0.0.0/16",
-// 					// 		"--leader-elect=false",
-// 					// 	},
-// 					// },
-// 					// {
-// 					// 	Name:  "kube-scheduler",
-// 					// 	Image: "rancher/hyperkube:v1.31.5-rancher1",
-// 					// 	Command: []string{
-// 					// 		"/usr/local/bin/kube-scheduler",
-// 					// 		"--master=http://127.0.0.1:8080",
-// 					// 	},
-// 					// },
-// 				},
-// 			},
-// 		},
-// 	},
-// }
-// }

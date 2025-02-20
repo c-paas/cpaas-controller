@@ -35,9 +35,8 @@ spec:
             type: object
           status:
             properties:
-              availableReplicas:
-                format: int32
-                type: integer
+              allPodsRunning:
+                type: boolean
             type: object
         type: object
     served: true
