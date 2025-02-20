@@ -404,7 +404,10 @@ func buildPods(cp *cpaasv1alpha1.ControlPlane) []corev1.Pod {
 				OwnerReferences: []metav1.OwnerReference{
 					*metav1.NewControllerRef(cp, cpaasv1alpha1.SchemeGroupVersion.WithKind("ControlPlane")),
 				},
-				Labels: labels,
+				Labels: map[string]string{
+					"app":        "etcd",
+					"controller": cp.Name,
+				},
 			},
 			Spec: corev1.PodSpec{
 				Volumes: []corev1.Volume{
@@ -430,18 +433,25 @@ func buildPods(cp *cpaasv1alpha1.ControlPlane) []corev1.Pod {
 								MountPath: "/etc/kubernetes/pki/certs",
 							},
 						},
+						Ports: []corev1.ContainerPort{
+							{
+								Name:          "port",
+								ContainerPort: 2379,
+								Protocol:      corev1.ProtocolTCP,
+							},
+						},
 						Command: []string{
 							"etcd",
-							"--advertise-client-urls=https://localhost:2379",
+							"--advertise-client-urls=https://0.0.0.0:2379",
 							"--initial-advertise-peer-urls=https://localhost:2380",
-							"--initial-cluster=control-plane=https://localhost:2380",
+							// "--initial-cluster=control-plane=https://localhost:2380",
 							"--cert-file=/etc/kubernetes/pki/certs/kube-api-server.crt",
 							"--data-dir=/var/lib/etcd",
 							"--experimental-initial-corrupt-check=true",
 							"--experimental-watch-progress-notify-interval=5s",
-							"--listen-client-urls=https://localhost:2379",
-							"--listen-metrics-urls=http://localhost:2381",
-							"--listen-peer-urls=https://localhost:2380",
+							"--listen-client-urls=https://0.0.0.0:2379",
+							"--listen-metrics-urls=http://0.0.0.0:2381",
+							"--listen-peer-urls=https://0.0.0.0:2380",
 							"--name=control-plane",
 							"--client-cert-auth=true",
 							"--key-file=/etc/kubernetes/pki/certs/kube-api-server.key",
@@ -489,13 +499,20 @@ func buildPods(cp *cpaasv1alpha1.ControlPlane) []corev1.Pod {
 								MountPath: "/etc/kubernetes/pki/certs",
 							},
 						},
+						Ports: []corev1.ContainerPort{
+							{
+								Name:          "port",
+								ContainerPort: 8080,
+								Protocol:      corev1.ProtocolTCP,
+							},
+						},
 						Command: []string{
 							"/usr/local/bin/kube-apiserver",
 							"--service-account-key-file=/etc/kubernetes/pki/certs/kube-api-server.crt",
 							"--service-account-signing-key-file=/etc/kubernetes/pki/certs/kube-api-server.key",
 							"--service-account-issuer=api",
 							"--bind-address=0.0.0.0",
-							"--etcd-servers=https://localhost:2379",
+							"--etcd-servers=https://etcd:2379",
 							"--etcd-cafile=/etc/kubernetes/pki/certs/ca.crt",
 							"--etcd-certfile=/etc/kubernetes/pki/certs/kube-api-server.crt",
 							"--etcd-keyfile=/etc/kubernetes/pki/certs/kube-api-server.key",
@@ -534,7 +551,7 @@ func buildPods(cp *cpaasv1alpha1.ControlPlane) []corev1.Pod {
 						Command: []string{
 							"/usr/local/bin/kube-controller-manager",
 							"--cluster-cidr=10.10.0.0/16",
-							"--master=http://127.0.0.1:8080",
+							"--master=http://kube-api-server:8080",
 							"--service-cluster-ip-range=10.0.0.0/16",
 							"--leader-elect=false",
 						},
@@ -570,7 +587,7 @@ func buildPods(cp *cpaasv1alpha1.ControlPlane) []corev1.Pod {
 						Image: "rancher/hyperkube:v1.31.5-rancher1",
 						Command: []string{
 							"/usr/local/bin/kube-scheduler",
-							"--master=http://127.0.0.1:8080",
+							"--master=http://kube-api-server:8080",
 						},
 					},
 				},
