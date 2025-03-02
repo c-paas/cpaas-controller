@@ -41,6 +41,7 @@ import (
 	"k8s.io/klog/v2"
 
 	cpaasv1alpha1 "github.com/c-paas/cpaas-controller/pkg/apis/cpaascontroller/v1alpha1"
+	"github.com/c-paas/cpaas-controller/pkg/certs"
 	clientset "github.com/c-paas/cpaas-controller/pkg/generated/clientset/versioned"
 	informers "github.com/c-paas/cpaas-controller/pkg/generated/informers/externalversions/cpaascontroller/v1alpha1"
 	listers "github.com/c-paas/cpaas-controller/pkg/generated/listers/cpaascontroller/v1alpha1"
@@ -252,11 +253,41 @@ func (c *Controller) syncHandler(ctx context.Context, objectRef cache.ObjectName
 		return nil
 	}
 
-	// Get the pods from control plane
 	selector := labels.NewSelector()
 	// TODO log error
-	podReq, _ := labels.NewRequirement("controller", selection.Equals, []string{cp.Name})
-	selector = selector.Add(*podReq)
+	controlPlaneReq, _ := labels.NewRequirement("controller", selection.Equals, []string{cp.Name})
+	selector = selector.Add(*controlPlaneReq)
+
+	// Check for etcd CA certificate
+	caSecret, err := c.kubeclientset.CoreV1().Secrets(cp.Namespace).Get(ctx, "etcd-ca", metav1.GetOptions{})
+	if errors.IsNotFound(err) {
+		logger.Info("CA for etcd doesn't exist yet, generating a new CA.")
+		ca, err := certs.GenerateCA(certs.CertOptions{})
+		if err != nil {
+			return err
+		}
+
+		caSecret = &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "etcd-ca",
+				Namespace: cp.Namespace,
+			},
+			Type: corev1.SecretTypeOpaque,
+			Data: map[string][]byte{
+				"cert": ca.CertPEM,
+				"key":  ca.KeyPEM,
+			},
+		}
+
+		caSecret, err = c.kubeclientset.CoreV1().Secrets(cp.Namespace).Create(ctx, caSecret, metav1.CreateOptions{})
+		if err != nil {
+			return err
+		}
+	} else if err != nil {
+		return err
+	}
+
+	// Get the pods from control plane
 	pods, err := c.podsLister.Pods(cp.Namespace).List(selector)
 	// If the resource doesn't exist, we'll create it
 	if len(pods) == 0 {
