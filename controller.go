@@ -41,6 +41,8 @@ import (
 	"k8s.io/klog/v2"
 
 	cpaasv1alpha1 "github.com/c-paas/cpaas-controller/pkg/apis/cpaascontroller/v1alpha1"
+	cpaasscheme "github.com/c-paas/cpaas-controller/pkg/generated/clientset/versioned/scheme"
+
 	clientset "github.com/c-paas/cpaas-controller/pkg/generated/clientset/versioned"
 	informers "github.com/c-paas/cpaas-controller/pkg/generated/informers/externalversions/cpaascontroller/v1alpha1"
 	listers "github.com/c-paas/cpaas-controller/pkg/generated/listers/cpaascontroller/v1alpha1"
@@ -91,7 +93,7 @@ func NewController(
 ) *Controller {
 	logger := klog.FromContext(ctx)
 
-	utilruntime.Must(scheme.AddToScheme(scheme.Scheme))
+	utilruntime.Must(cpaasscheme.AddToScheme(scheme.Scheme))
 	logger.V(4).Info("Creating event broadcaster")
 
 	eventBroadcaster := record.NewBroadcaster(record.WithContext(ctx))
@@ -392,10 +394,6 @@ func (c *Controller) handleObject(obj interface{}) {
 // the appropriate OwnerReferences on the resource so handleObject can discover
 // the ControlPlane resource that 'owns' it.
 func buildPods(cp *cpaasv1alpha1.ControlPlane) []corev1.Pod {
-	labels := map[string]string{
-		"app":        "control-plane",
-		"controller": cp.Name,
-	}
 	return []corev1.Pod{
 		{
 			ObjectMeta: metav1.ObjectMeta{
@@ -435,16 +433,26 @@ func buildPods(cp *cpaasv1alpha1.ControlPlane) []corev1.Pod {
 						},
 						Ports: []corev1.ContainerPort{
 							{
-								Name:          "port",
+								Name:          "one",
 								ContainerPort: 2379,
+								Protocol:      corev1.ProtocolTCP,
+							},
+							{
+								Name:          "two",
+								ContainerPort: 2380,
+								Protocol:      corev1.ProtocolTCP,
+							},
+							{
+								Name:          "three",
+								ContainerPort: 2381,
 								Protocol:      corev1.ProtocolTCP,
 							},
 						},
 						Command: []string{
 							"etcd",
 							"--advertise-client-urls=https://0.0.0.0:2379",
-							"--initial-advertise-peer-urls=https://localhost:2380",
-							// "--initial-cluster=control-plane=https://localhost:2380",
+							"--initial-advertise-peer-urls=https://0.0.0.0:2380",
+							"--initial-cluster=control-plane=https://0.0.0.0:2380",
 							"--cert-file=/etc/kubernetes/pki/certs/kube-api-server.crt",
 							"--data-dir=/var/lib/etcd",
 							"--experimental-initial-corrupt-check=true",
@@ -468,12 +476,15 @@ func buildPods(cp *cpaasv1alpha1.ControlPlane) []corev1.Pod {
 		},
 		{
 			ObjectMeta: metav1.ObjectMeta{
-				Name:      "kube-api-server",
+				Name:      "api-server",
 				Namespace: cp.Namespace,
 				OwnerReferences: []metav1.OwnerReference{
 					*metav1.NewControllerRef(cp, cpaasv1alpha1.SchemeGroupVersion.WithKind("ControlPlane")),
 				},
-				Labels: labels,
+				Labels: map[string]string{
+					"app":        "api-server",
+					"controller": cp.Name,
+				},
 			},
 			Spec: corev1.PodSpec{
 				Volumes: []corev1.Volume{
@@ -490,7 +501,7 @@ func buildPods(cp *cpaasv1alpha1.ControlPlane) []corev1.Pod {
 				},
 				Containers: []corev1.Container{
 					{
-						Name:  "kube-api-server",
+						Name:  "api-server",
 						Image: "rancher/hyperkube:v1.31.5-rancher1",
 						VolumeMounts: []corev1.VolumeMount{
 							{
@@ -501,8 +512,8 @@ func buildPods(cp *cpaasv1alpha1.ControlPlane) []corev1.Pod {
 						},
 						Ports: []corev1.ContainerPort{
 							{
-								Name:          "port",
-								ContainerPort: 8080,
+								Name:          "https",
+								ContainerPort: 6443,
 								Protocol:      corev1.ProtocolTCP,
 							},
 						},
@@ -512,6 +523,7 @@ func buildPods(cp *cpaasv1alpha1.ControlPlane) []corev1.Pod {
 							"--service-account-signing-key-file=/etc/kubernetes/pki/certs/kube-api-server.key",
 							"--service-account-issuer=api",
 							"--bind-address=0.0.0.0",
+							"--authorization-mode=Node,RBAC",
 							"--etcd-servers=https://etcd:2379",
 							"--etcd-cafile=/etc/kubernetes/pki/certs/ca.crt",
 							"--etcd-certfile=/etc/kubernetes/pki/certs/kube-api-server.crt",
@@ -529,7 +541,10 @@ func buildPods(cp *cpaasv1alpha1.ControlPlane) []corev1.Pod {
 				OwnerReferences: []metav1.OwnerReference{
 					*metav1.NewControllerRef(cp, cpaasv1alpha1.SchemeGroupVersion.WithKind("ControlPlane")),
 				},
-				Labels: labels,
+				Labels: map[string]string{
+					"app":        "kube-controller-manager",
+					"controller": cp.Name,
+				},
 			},
 			Spec: corev1.PodSpec{
 				Volumes: []corev1.Volume{
@@ -548,10 +563,19 @@ func buildPods(cp *cpaasv1alpha1.ControlPlane) []corev1.Pod {
 					{
 						Name:  "kube-controller-manager",
 						Image: "rancher/hyperkube:v1.31.5-rancher1",
+						VolumeMounts: []corev1.VolumeMount{
+							{
+								Name:      "certs",
+								ReadOnly:  true,
+								MountPath: "/etc/kubernetes/pki/certs",
+							},
+						},
 						Command: []string{
 							"/usr/local/bin/kube-controller-manager",
 							"--cluster-cidr=10.10.0.0/16",
-							"--master=http://kube-api-server:8080",
+							"--master=https://api-server:6443",
+							"--tls-cert-file=/etc/kubernetes/pki/certs/kube-controller-manager.crt",
+							"--tls-private-key-file=/etc/kubernetes/pki/certs/kube-controller-manager.key",
 							"--service-cluster-ip-range=10.0.0.0/16",
 							"--leader-elect=false",
 						},
@@ -566,7 +590,10 @@ func buildPods(cp *cpaasv1alpha1.ControlPlane) []corev1.Pod {
 				OwnerReferences: []metav1.OwnerReference{
 					*metav1.NewControllerRef(cp, cpaasv1alpha1.SchemeGroupVersion.WithKind("ControlPlane")),
 				},
-				Labels: labels,
+				Labels: map[string]string{
+					"app":        "kube-scheduler",
+					"controller": cp.Name,
+				},
 			},
 			Spec: corev1.PodSpec{
 				Volumes: []corev1.Volume{
@@ -585,9 +612,18 @@ func buildPods(cp *cpaasv1alpha1.ControlPlane) []corev1.Pod {
 					{
 						Name:  "kube-scheduler",
 						Image: "rancher/hyperkube:v1.31.5-rancher1",
+						VolumeMounts: []corev1.VolumeMount{
+							{
+								Name:      "certs",
+								ReadOnly:  true,
+								MountPath: "/etc/kubernetes/pki/certs",
+							},
+						},
 						Command: []string{
 							"/usr/local/bin/kube-scheduler",
-							"--master=http://kube-api-server:8080",
+							"--tls-cert-file=/etc/kubernetes/pki/certs/kube-scheduler.crt",
+							"--tls-private-key-file=/etc/kubernetes/pki/certs/kube-scheduler.key",
+							"--master=https://api-server:6443",
 						},
 					},
 				},

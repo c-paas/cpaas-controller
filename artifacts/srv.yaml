@@ -1,0 +1,26 @@
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: etcd
+spec:
+  ports:
+  - port: 2379
+    name: main
+    targetPort: 2379
+  - port: 2380
+    name: second
+    targetPort: 2380
+  selector:
+    app: etcd
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: api-server
+spec:
+  ports:
+  - port: 6443
+    targetPort: 6443
+  selector:
+    app: api-server
